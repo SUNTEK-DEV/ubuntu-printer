@@ -136,3 +136,57 @@ dmesg | grep -i usblp     # detect the USB reset loop
 3. **Don't** use the folder `D:\xingyedayingji` as a driver — it is a **Windows-only** Seagull XP-series (TSPL label printer) driver package, unrelated to the XP-MP80PC. It can be deleted.
 4. Keep the default queue `XP-MP80`; submit jobs from the service account as shown above.
 5. **Don't** delete `/usr/lib/cups/backend/usbraw` or strip its 755 permissions — the queue stops working without it.
+
+## 7. Deploying / migrating to another Ubuntu machine
+
+### 7.1 Plugging the printer directly into another Ubuntu (raw method)
+
+**No "driver" installation is required** — these ESC/POS receipt printers have no official Linux driver package. But the target machine must recreate two things:
+
+1. The `usbraw` backend (otherwise CUPS' stock `usb://` backend fires the IEEE-1284 probe, the firmware resets the USB port, and jobs hang);
+2. The raw queue `XP-MP80`.
+
+Run the following script as **root** (dependencies are only CUPS and gzip, both stock):
+
+```bash
+# 1) Create the custom backend: dump CUPS jobs straight into /dev/usb/lp1
+cat > /usr/lib/cups/backend/usbraw <<'EOF'
+#!/bin/bash
+exec >> /var/log/usbraw.log 2>&1
+f="/tmp/usbraw_src_$$.raw"
+if [ -n "$6" ] && [ "$6" != "-" ] && [ -e "$6" ]; then SRC="$6"; else SRC="$f"; cat > "$f"; fi
+magic=$(head -c2 "$SRC" | od -An -tx1 | tr -d ' \n')
+tmp="/tmp/usbraw_out_$$.raw"
+if [ "$magic" = "1f8b" ]; then gzip -dc "$SRC" > "$tmp"; else cat "$SRC" > "$tmp"; fi
+dd if="$tmp" of=/dev/usb/lp1 status=none
+rc=$?; rm -f "$f" "$tmp"; exit "$rc"
+EOF
+chmod 755 /usr/lib/cups/backend/usbraw
+
+# 2) Create the raw queue and set it as default
+lpadmin -p XP-MP80 -E -v usbraw:/dev/usb/lp1 -m raw
+lpadmin -d XP-MP80
+```
+
+Confirm the USB printing node exists first:
+
+```bash
+lsusb               # expect 0483:5743 STMicroelectronics USB Printer
+ls -l /dev/usb/lp1  # present if the usblp driver is loaded
+```
+
+### 7.2 Printing from other machines over the network (shared print server)
+
+**Client machines need zero configuration and zero drivers** — no backend required. Steps:
+
+1. Turn on sharing on the print server (this machine, 192.168.1.231):
+   ```bash
+   cupsctl --share-printers --remote-any
+   ```
+2. On each client, add a *network printer* with the address:
+   ```
+   ipp://192.168.1.231:631/printers/XP-MP80
+   ```
+   Pick **Generic / Raw** (or CUPS' "everywhere") as the driver; client-side printing commands and GB18030 handling are identical to sections 3 and 4.
+
+> **Note:** this XP-MP80PC only has USB + serial (and the serial port does not work), so it has **no network port of its own**. Other machines cannot reach the printer directly — network printing must go through the 192.168.1.231 print server.
